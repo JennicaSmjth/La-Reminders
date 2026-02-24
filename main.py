@@ -3,54 +3,44 @@ from discord import ui, app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time
 import json
-import os
-from dotenv import load_dotenv
 
-# --- INITIAL SETUP ---
-load_dotenv()
-# On your server, make a file named .env and put: DISCORD_TOKEN=your_actual_token
-BOT_TOKEN = os.getenv('DISCORD_TOKEN') or 'TOKEN HERE' 
+# ================= CONFIGURATION =================
+BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
+# =================================================
 
-MY_USER_ID = 896389113576562749  
 ASSIGNMENT_FILE = "grade_tasks.json"
-ANNOUNCE_CHANNEL_ID = 123456789012345678 # CHANGE THIS to your channel ID
 
-# --- DATA HELPERS ---
 def load_tasks():
     try:
         with open(ASSIGNMENT_FILE, "r") as f: return json.load(f)
-    except: return []
+    except: return {"channel_id": None, "tasks": []}
 
 def save_tasks(data):
     with open(ASSIGNMENT_FILE, "w") as f: json.dump(data, f)
 
-# --- THE UI (MODALS & DROPDOWNS) ---
 class AddTaskModal(ui.Modal):
-    def __init__(self, subject, owner_name):
+    def __init__(self, subject):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
-        self.owner_name = owner_name
 
-    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Chapter 5 Quiz", required=True)
+    name = ui.TextInput(label="Assignment Name", placeholder="e.g. History Essay", required=True)
     date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
 
     async def on_submit(self, interaction: discord.Interaction):
         data = load_tasks()
-        data.append({"subject": self.subject, "name": self.name.value, "due": self.date.value})
+        data["tasks"].append({"subject": self.subject, "name": self.name.value, "due": self.date.value})
         save_tasks(data)
         
         embed = discord.Embed(title="✅ Task Logged", color=discord.Color.green())
         embed.add_field(name="Class", value=self.subject)
         embed.add_field(name="Task", value=self.name.value)
-        embed.add_field(name="Due Date", value=self.date.value)
-        embed.set_footer(text=f"Managed by {self.owner_name}")
+        embed.set_footer(text="Managed by Ryan")
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(f"Logged! I'll ping everyone here 3 days before **{self.date.value}**.", embed=embed, ephemeral=True)
 
 class SubjectView(ui.View):
-    def __init__(self, owner_name):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.owner_name = owner_name
         
     @ui.select(
         placeholder="Which class is this for?",
@@ -63,9 +53,8 @@ class SubjectView(ui.View):
         ]
     )
     async def select_subject(self, interaction: discord.Interaction, select: ui.Select):
-        await interaction.response.send_modal(AddTaskModal(select.values[0], self.owner_name))
+        await interaction.response.send_modal(AddTaskModal(select.values[0]))
 
-# --- THE BOT CORE ---
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -75,25 +64,23 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         self.daily_check.start()
-        print(f"✅ Bot is online as {self.user}")
+        print(f"✅ {self.user} is online and managed by Ryan.")
 
-    # THE 7:00 AM ALERT LOOP
     @tasks.loop(time=time(hour=7, minute=0)) 
     async def daily_check(self):
-        channel = self.get_channel(ANNOUNCE_CHANNEL_ID)
+        data = load_tasks()
+        if not data["channel_id"] or not data["tasks"]: return
+        
+        channel = self.get_channel(data["channel_id"])
         if not channel: return
         
-        data = load_tasks()
-        if not data: return
-        
         now = datetime.now().date()
-        updated_data = []
+        updated_tasks = []
 
-        for task in data:
+        for task in data["tasks"]:
             due_date = datetime.strptime(task['due'], "%Y-%m-%d").date()
             days_left = (due_date - now).days
 
-            # Urgency levels
             if days_left == 3:
                 await channel.send(f"⏰ @everyone **DUE SOON**: **{task['subject']} - {task['name']}** is in 3 days!")
             elif days_left == 2:
@@ -101,22 +88,26 @@ class MyBot(commands.Bot):
             elif days_left == 1:
                 await channel.send(f"💀 @everyone **YOU ARE COOKED**: **{task['subject']} - {task['name']}** is DUE TOMORROW!")
             
-            # Keep if not past due
-            if days_left > 0:
-                updated_data.append(task)
-        save_tasks(updated_data)
+            if days_left > 0: updated_tasks.append(task)
+            
+        data["tasks"] = updated_tasks
+        save_tasks(data)
 
 bot = MyBot()
 
-@bot.tree.command(name="setup_tracker", description="Launch the assignment menu")
+@bot.tree.command(name="setup_tracker", description="Admins only: Set the channel for reminders")
+@app_commands.checks.has_permissions(administrator=True)
 async def setup_tracker(interaction: discord.Interaction):
-    owner = await interaction.client.fetch_user(MY_USER_ID)
+    data = load_tasks()
+    data["channel_id"] = interaction.channel_id
+    save_tasks(data)
+
     embed = discord.Embed(
         title="📅 Grade Assignment Tracker", 
-        description="Add assignments here. The bot will ping @everyone when deadlines are close.",
+        description="Select a class below to add a deadline. The bot will ping @everyone here at 7:00 AM when the deadline is close.",
         color=discord.Color.blue()
     )
-    embed.set_footer(text=f"Managed by {owner.name}")
-    await interaction.response.send_message(embed=embed, view=SubjectView(owner.name))
+    embed.set_footer(text="Managed by Ryan")
+    await interaction.response.send_message(embed=embed, view=SubjectView())
 
 bot.run(BOT_TOKEN)
