@@ -10,25 +10,21 @@ BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE'
 
 ASSIGNMENT_FILE = "grade_tasks.json"
 
-def load_tasks():
+def load_data():
     try:
         with open(ASSIGNMENT_FILE, "r") as f: return json.load(f)
-    except: return {"channel_id": None, "tasks": []}
+    except: return {}
 
-def save_tasks(data):
-    with open(ASSIGNMENT_FILE, "w") as f: json.dump(data, f)
+def save_data(data):
+    with open(ASSIGNMENT_FILE, "w") as f: json.dump(data, f, indent=4)
 
-# Helper to fix messy date inputs like 2026-2-5
 def parse_date(date_str):
-    for fmt in ("%Y-%m-%d", "%Y-%n-%j", "%Y-%m-%j"): # Handles 2026-2-5 or 2026-02-05
-        try:
-            # Reformat to standard YYYY-MM-DD for storage
-            dt = datetime.strptime(date_str, fmt).date()
-            return dt
-        except ValueError:
-            continue
+    for fmt in ("%Y-%m-%d", "%Y-%n-%j", "%Y-%m-%j"):
+        try: return datetime.strptime(date_str, fmt).date()
+        except ValueError: continue
     return None
 
+# --- UI COMPONENTS ---
 class AddTaskModal(ui.Modal):
     def __init__(self, subject):
         super().__init__(title=f"New {subject} Task")
@@ -39,30 +35,19 @@ class AddTaskModal(ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
-        
         if not clean_date:
-            return await interaction.response.send_message("❌ Wrong date format! Use YYYY-MM-DD (like 2026-2-5).", ephemeral=True)
+            return await interaction.response.send_message("❌ Wrong date format!", ephemeral=True)
 
-        data = load_tasks()
-        data["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date)})
-        save_tasks(data)
+        guild_id = str(interaction.guild_id)
+        data = load_data()
         
-        # Check if it's due VERY soon right now
-        now = datetime.now().date()
-        days_left = (clean_date - now).days
-        
-        embed = discord.Embed(title="✅ Task Logged", color=discord.Color.green())
-        embed.add_field(name="Class", value=self.subject)
-        embed.add_field(name="Task", value=self.name.value)
-        embed.set_footer(text="Managed by Ryan")
-        
-        await interaction.response.send_message(f"Logged for {clean_date}!", embed=embed, ephemeral=True)
+        if guild_id not in data:
+            data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
 
-        # If added late (e.g., due tomorrow), ping immediately!
-        if days_left == 1:
-            channel = interaction.client.get_channel(data["channel_id"])
-            if channel:
-                await channel.send(f"💀 @everyone **LATE ENTRY**: **{self.subject} - {self.name.value}** was just added and it's DUE TOMORROW!")
+        data[guild_id]["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date)})
+        save_data(data)
+        
+        await interaction.response.send_message(f"✅ Added {self.subject} task for {clean_date}!", ephemeral=True)
 
 class SubjectView(ui.View):
     def __init__(self):
@@ -81,6 +66,7 @@ class SubjectView(ui.View):
     async def select_subject(self, interaction: discord.Interaction, select: ui.Select):
         await interaction.response.send_modal(AddTaskModal(select.values[0]))
 
+# --- THE BOT LOGIC ---
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -90,50 +76,82 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         self.daily_check.start()
-        print(f"✅ Ready. Alerts set for 6:00 PM.")
 
-    @tasks.loop(time=time(hour=18, minute=0)) # 6:00 PM (18:00)
+    async def refresh_menu(self, guild_id, channel):
+        """Deletes the old menu and sends a new one to keep it at the bottom."""
+        data = load_data()
+        
+        # Try to delete the old message
+        if data.get(guild_id, {}).get("last_menu_id"):
+            try:
+                old_msg = await channel.fetch_message(data[guild_id]["last_menu_id"])
+                await old_msg.delete()
+            except: pass # It's already gone or doesn't exist
+
+        embed = discord.Embed(
+            title="📅 Grade Assignment Tracker", 
+            description="Select a class to add a deadline. Reminders sent daily at 6 PM.",
+            color=discord.Color.blue()
+        )
+        embed.set_footer(text="Managed by Ryan")
+        new_msg = await channel.send(embed=embed, view=SubjectView())
+        
+        data[guild_id]["last_menu_id"] = new_msg.id
+        save_data(data)
+
+    @tasks.loop(time=time(hour=18, minute=0)) 
     async def daily_check(self):
-        data = load_tasks()
-        if not data["channel_id"] or not data["tasks"]: return
-        
-        channel = self.get_channel(data["channel_id"])
-        if not channel: return
-        
+        data = load_data()
         now = datetime.now().date()
-        updated_tasks = []
 
-        for task in data["tasks"]:
-            due_date = datetime.strptime(task['due'], "%Y-%m-%d").date()
-            days_left = (due_date - now).days
+        for guild_id, info in data.items():
+            channel = self.get_channel(info["channel_id"])
+            if not channel: continue
+            
+            pings_sent = False
+            updated_tasks = []
 
-            if days_left == 3:
-                await channel.send(f"⏰ @everyone **DUE SOON**: **{task['subject']} - {task['name']}** is in 3 days!")
-            elif days_left == 2:
-                await channel.send(f"🚧 @everyone **SHOULD START**: **{task['subject']} - {task['name']}** is in 2 days!")
-            elif days_left == 1:
-                await channel.send(f"💀 @everyone **YOU ARE COOKED**: **{task['subject']} - {task['name']}** is DUE TOMORROW!")
+            for task in info["tasks"]:
+                due_date = datetime.strptime(task['due'], "%Y-%m-%d").date()
+                days_left = (due_date - now).days
+
+                embed = None
+                if days_left == 3:
+                    embed = discord.Embed(title="🟢 3 DAYS LEFT", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.green())
+                elif days_left == 2:
+                    embed = discord.Embed(title="🟡 2 DAYS LEFT", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.gold())
+                elif days_left == 1:
+                    embed = discord.Embed(title="🔴 ITS OVER IF YOU HAVN'T STARTED", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.red())
+
+                if embed:
+                    embed.set_footer(text="Managed by Ryan")
+                    await channel.send(content="@everyone", embed=embed)
+                    pings_sent = True
+                
+                if days_left > 0: updated_tasks.append(task)
             
-            if days_left > 0: updated_tasks.append(task)
-            
-        data["tasks"] = updated_tasks
-        save_tasks(data)
+            data[guild_id]["tasks"] = updated_tasks
+            save_data(data)
+
+            # If we sent alerts, the menu is now buried. Let's move it to the bottom!
+            if pings_sent:
+                await self.refresh_menu(guild_id, channel)
 
 bot = MyBot()
 
-@bot.tree.command(name="setup_tracker", description="Admins only: Set the channel for reminders")
+@bot.tree.command(name="setup_tracker", description="Admins: Set the channel for reminders")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_tracker(interaction: discord.Interaction):
-    data = load_tasks()
-    data["channel_id"] = interaction.channel_id
-    save_tasks(data)
+    guild_id = str(interaction.guild_id)
+    data = load_data()
+    
+    if guild_id not in data:
+        data[guild_id] = {"tasks": [], "last_menu_id": None}
+    
+    data[guild_id]["channel_id"] = interaction.channel_id
+    save_data(data)
 
-    embed = discord.Embed(
-        title="📅 Grade Assignment Tracker", 
-        description="Select a class below to add a deadline. The bot will ping @everyone here at 6:00 PM daily.",
-        color=discord.Color.blue()
-    )
-    embed.set_footer(text="Managed by Ryan")
-    await interaction.response.send_message(embed=embed, view=SubjectView())
+    await interaction.response.send_message("Tracker Initialized!", ephemeral=True)
+    await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
