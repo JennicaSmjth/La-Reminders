@@ -3,6 +3,7 @@ from discord import ui, app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time
 import json
+import os
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
@@ -10,6 +11,7 @@ BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE'
 
 ASSIGNMENT_FILE = "grade_tasks.json"
 
+# --- DATA HELPERS ---
 def load_data():
     try:
         with open(ASSIGNMENT_FILE, "r") as f: return json.load(f)
@@ -19,7 +21,7 @@ def save_data(data):
     with open(ASSIGNMENT_FILE, "w") as f: json.dump(data, f, indent=4)
 
 def parse_date(date_str):
-    for fmt in ("%Y-%m-%d", "%Y-%n-%j", "%Y-%m-%j"):
+    for fmt in ("%Y-%m-%d", "%Y-%m-%j", "%Y-%n-%j", "%Y-%n-%d"):
         try: return datetime.strptime(date_str, fmt).date()
         except ValueError: continue
     return None
@@ -30,13 +32,13 @@ class AddTaskModal(ui.Modal):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
 
-    name = ui.TextInput(label="Assignment Name", placeholder="e.g. History Essay", required=True)
+    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Chapter 4 Quiz", required=True)
     date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-2-5", min_length=8, max_length=10)
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
         if not clean_date:
-            return await interaction.response.send_message("❌ Wrong date format!", ephemeral=True)
+            return await interaction.response.send_message("❌ Invalid date! Use YYYY-MM-DD (e.g., 2026-3-25)", ephemeral=True)
 
         guild_id = str(interaction.guild_id)
         data = load_data()
@@ -47,7 +49,19 @@ class AddTaskModal(ui.Modal):
         data[guild_id]["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date)})
         save_data(data)
         
-        await interaction.response.send_message(f"✅ Added {self.subject} task for {clean_date}!", ephemeral=True)
+        now = datetime.now().date()
+        days_left = (clean_date - now).days
+        
+        await interaction.response.send_message(f"✅ Added! Due in {days_left} days.", ephemeral=True)
+
+        # Immediate ping if it's due tomorrow
+        if days_left == 1:
+            await interaction.channel.send(content="@everyone", embed=discord.Embed(
+                title="🔴 ITS OVER IF YOU HAVN'T STARTED",
+                description=f"**LATE ENTRY**: {self.subject} - {self.name.value} is due tomorrow!",
+                color=discord.Color.red()
+            ).set_footer(text="Managed by Ryan"))
+            await interaction.client.refresh_menu(guild_id, interaction.channel)
 
 class SubjectView(ui.View):
     def __init__(self):
@@ -66,7 +80,7 @@ class SubjectView(ui.View):
     async def select_subject(self, interaction: discord.Interaction, select: ui.Select):
         await interaction.response.send_modal(AddTaskModal(select.values[0]))
 
-# --- THE BOT LOGIC ---
+# --- THE BOT CORE ---
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
@@ -76,10 +90,11 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         self.daily_check.start()
-        print(f"✅ Ready. Separating data by Server ID.")
+        print(f"✅ Bot is live. Daily alerts at 6:00 PM.")
 
     async def refresh_menu(self, guild_id, channel):
         data = load_data()
+        # Delete old menu if it exists
         if data.get(guild_id, {}).get("last_menu_id"):
             try:
                 old_msg = await channel.fetch_message(data[guild_id]["last_menu_id"])
@@ -88,7 +103,7 @@ class MyBot(commands.Bot):
 
         embed = discord.Embed(
             title="📅 Grade Assignment Tracker", 
-            description="Select a class to add a deadline. Reminders sent daily at 6 PM.",
+            description="Select a class to add a deadline. The bot will ping @everyone here at 6:00 PM daily.",
             color=discord.Color.blue()
         )
         embed.set_footer(text="Managed by Ryan")
@@ -135,7 +150,7 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-@bot.tree.command(name="setup_tracker", description="Admins: Set the channel for reminders")
+@bot.tree.command(name="setup_tracker", description="Admins: Initialize the tracker in this channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_tracker(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
@@ -144,22 +159,21 @@ async def setup_tracker(interaction: discord.Interaction):
         data[guild_id] = {"tasks": [], "last_menu_id": None}
     data[guild_id]["channel_id"] = interaction.channel_id
     save_data(data)
-    await interaction.response.send_message("Tracker Initialized!", ephemeral=True)
+    await interaction.response.send_message("Initializing...", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
-# --- THE TEST COMMAND ---
-@bot.tree.command(name="test_embed", description="See how the pings and setup look right now")
+@bot.tree.command(name="test_embed", description="Verify layout and move menu to bottom")
 async def test_embed(interaction: discord.Interaction):
     test_embed = discord.Embed(
         title="🔍 DIAGNOSTIC TEST",
-        description="This is a test of the assignment layout.",
+        description="Testing layout. Subject: TEST | Task: TEST TEST TEST",
         color=discord.Color.blue()
     )
-    test_embed.add_field(name="Subject: TEST", value="Assignment: TEST TEST TEST", inline=False)
-    test_embed.add_field(name="Status", value="🔴 ITS OVER IF YOU HAVN'T STARTED", inline=False)
+    test_embed.add_field(name="Current Status", value="🔴 ITS OVER IF YOU HAVN'T STARTED")
     test_embed.set_footer(text="Managed by Ryan")
     
-    await interaction.response.send_message("Spouting test diagnostic...", ephemeral=True)
-    await interaction.channel.send(embed=test_embed)
+    await interaction.response.send_message("Diagnostic running...", ephemeral=True)
+    await interaction.channel.send(content="@everyone", embed=test_embed)
+    await bot.refresh_menu(str(interaction.guild_id), interaction.channel)
 
 bot.run(BOT_TOKEN)
