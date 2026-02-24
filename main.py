@@ -3,12 +3,12 @@ from discord import ui, app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time
 import json
+import asyncio
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
-# =================================================
-
+BOT_TOKEN = 'BOT_TOKEN' 
 ASSIGNMENT_FILE = "grade_tasks.json"
+# =================================================
 
 def load_data():
     try:
@@ -24,6 +24,36 @@ def parse_date(date_str):
         except ValueError: continue
     return None
 
+# --- UI COMPONENTS ---
+
+class DeleteTaskSelect(ui.Select):
+    def __init__(self, tasks, guild_id):
+        options = [
+            discord.SelectOption(
+                label=f"{t['subject']}: {t['name']}", 
+                description=f"Due: {t['due']}", 
+                value=str(i)
+            ) for i, t in enumerate(tasks)
+        ][:25] # Discord limits select menus to 25 items
+        super().__init__(placeholder="Select a task to remove...", options=options)
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = interaction.client.cached_data
+        index = int(self.values[0])
+        
+        removed = data[self.guild_id]["tasks"].pop(index)
+        save_data(data)
+        
+        await interaction.response.send_message(f"🗑️ Removed: **{removed['name']}**", ephemeral=True)
+        # Refresh the main menu to show it's gone
+        await interaction.client.refresh_menu(self.guild_id, interaction.channel)
+
+class ManageView(ui.View):
+    def __init__(self, tasks, guild_id):
+        super().__init__(timeout=60)
+        self.add_item(DeleteTaskSelect(tasks, guild_id))
+
 class AddTaskModal(ui.Modal):
     def __init__(self, subject):
         super().__init__(title=f"New {subject} Task")
@@ -35,71 +65,89 @@ class AddTaskModal(ui.Modal):
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
         if not clean_date:
-            return await interaction.response.send_message("❌ Invalid date!", ephemeral=True)
+            return await interaction.response.send_message("❌ Invalid date format!", ephemeral=True)
 
         guild_id = str(interaction.guild_id)
-        # Use the bot's memory instead of reading the file
         data = interaction.client.cached_data
         
         if guild_id not in data:
             data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
 
         data[guild_id]["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date)})
-        save_data(data) # Save to file in background
+        save_data(data)
         
         await interaction.response.send_message(f"✅ Added! Due {clean_date}", ephemeral=True)
+        # Refresh the main dashboard
+        await interaction.client.refresh_menu(guild_id, interaction.channel)
 
 class SubjectView(ui.View):
     def __init__(self):
         super().__init__(timeout=None)
         
     @ui.select(
-        placeholder="Which class is this for?",
+        placeholder="Select a class to add a deadline...",
         options=[
-            discord.SelectOption(label="English (Mr Andy)", emoji="📚"),
-            discord.SelectOption(label="Math (Ms Schumie)", emoji="📐"),
-            discord.SelectOption(label="Art (Ms Leah)", emoji="🎨"),
-            discord.SelectOption(label="Music (Mr Gonzales)", emoji="🎸"),
-            discord.SelectOption(label="Other/General", emoji="📝")
+            discord.SelectOption(label="English", emoji="📚"),
+            discord.SelectOption(label="Math", emoji="📐"),
+            discord.SelectOption(label="Art", emoji="🎨"),
+            discord.SelectOption(label="Music", emoji="🎸"),
+            discord.SelectOption(label="Other", emoji="📝")
         ]
     )
     async def select_subject(self, interaction: discord.Interaction, select: ui.Select):
         await interaction.response.send_modal(AddTaskModal(select.values[0]))
+
+    @ui.button(label="🗑️ Manage / Delete Tasks", style=discord.ButtonStyle.danger)
+    async def manage_tasks(self, interaction: discord.Interaction, button: ui.Button):
+        guild_id = str(interaction.guild_id)
+        tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
+        
+        if not tasks:
+            return await interaction.response.send_message("No tasks to delete! 🥳", ephemeral=True)
+        
+        # Send the private "Secret Menu" for deletion
+        await interaction.response.send_message("Which task would you like to remove?", view=ManageView(tasks, guild_id), ephemeral=True)
+
+# --- THE BOT ---
 
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        # BRAIN POWER: Load data once into RAM
         self.cached_data = load_data()
 
     async def setup_hook(self):
         await self.tree.sync()
         self.daily_check.start()
-        print(f"✅ Turbo Bot is online.")
+        print(f"🚀 Turbo Bot Ready.")
 
     async def refresh_menu(self, guild_id, channel):
-        """The 'Sleight of Hand' Refresh"""
-        # 1. SEND NEW MENU IMMEDIATELY
-        embed = discord.Embed(
-            title="📅 Grade Assignment Tracker", 
-            description="Select a class to add a deadline. Pings @everyone at 6:00 PM.",
-            color=discord.Color.blue()
-        ).set_footer(text="Managed by Ryan")
+        """The TDS-Style 'Bottom Lock' logic"""
+        data = self.cached_data.get(guild_id, {"tasks": []})
         
+        # Build the task list display
+        task_display = ""
+        if not data["tasks"]:
+            task_display = "No upcoming deadlines! Chill vibes only. 😎"
+        else:
+            for t in sorted(data["tasks"], key=lambda x: x['due']):
+                task_display += f"• **{t['due']}**: {t['subject']} - {t['name']}\n"
+
+        embed = discord.Embed(
+            title="📅 Class Assignment Tracker", 
+            description=f"Current Deadlines:\n{task_display}",
+            color=discord.Color.blue()
+        ).set_footer(text="Developed by Ryan | v2.2.0")
+
+        # 1. SEND NEW FIRST (Instant satisfaction)
         new_msg = await channel.send(embed=embed, view=SubjectView())
         
-        # 2. CAPTURE OLD ID
+        # 2. DELETE OLD SECOND (Background cleanup)
         old_id = self.cached_data.get(guild_id, {}).get("last_menu_id")
-        
-        # 3. UPDATE MEMORY & FILE
-        if guild_id not in self.cached_data:
-            self.cached_data[guild_id] = {"tasks": [], "channel_id": channel.id}
         self.cached_data[guild_id]["last_menu_id"] = new_msg.id
         save_data(self.cached_data)
 
-        # 4. DELETE OLD MENU LAST (Background cleanup)
         if old_id:
             try:
                 old_msg = await channel.fetch_message(old_id)
@@ -119,18 +167,16 @@ class MyBot(commands.Bot):
                 due_date = datetime.strptime(task['due'], "%Y-%m-%d").date()
                 days_left = (due_date - now).days
                 
-                embed = None
-                if days_left == 3:
-                    embed = discord.Embed(title="🟢 3 DAYS LEFT", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.green())
-                elif days_left == 2:
-                    embed = discord.Embed(title="🟡 2 DAYS LEFT", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.gold())
-                elif days_left == 1:
-                    embed = discord.Embed(title="🔴 ITS OVER IF YOU HAVN'T STARTED", description=f"**{task['subject']}**: {task['name']}", color=discord.Color.red())
-
-                if embed:
-                    await channel.send(content="@everyone", embed=embed.set_footer(text="Managed by Ryan"))
+                if 0 < days_left <= 3:
+                    colors = {3: discord.Color.green(), 2: discord.Color.gold(), 1: discord.Color.red()}
+                    titles = {3: "🟢 3 DAYS LEFT", 2: "🟡 2 DAYS LEFT", 1: "🔴 FINAL WARNING"}
+                    
+                    embed = discord.Embed(title=titles[days_left], description=f"**{task['subject']}**: {task['name']}", color=colors[days_left])
+                    await channel.send(content="@everyone", embed=embed)
                     pings_sent = True
-                if days_left > 0: updated_tasks.append(task)
+                
+                if days_left >= 0: # Keep tasks until the day they are due
+                    updated_tasks.append(task)
             
             self.cached_data[guild_id]["tasks"] = updated_tasks
             save_data(self.cached_data)
@@ -139,17 +185,16 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-@bot.tree.command(name="setup_tracker")
+@bot.tree.command(name="setup_tracker", description="Initializes the tracker in this channel")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup_tracker(interaction: discord.Interaction):
-    await interaction.response.send_message("Initializing Turbo Tracker...", ephemeral=True)
-    await bot.refresh_menu(str(interaction.guild_id), interaction.channel)
-
-@bot.tree.command(name="test_embed")
-async def test_embed(interaction: discord.Interaction):
-    test_embed = discord.Embed(title="🔍 DIAGNOSTIC", description="Testing layout...", color=discord.Color.blue()).set_footer(text="Managed by Ryan")
-    await interaction.response.send_message("Running...", ephemeral=True)
-    await interaction.channel.send(content="@everyone", embed=test_embed)
-    await bot.refresh_menu(str(interaction.guild_id), interaction.channel)
+    await interaction.response.send_message("Initializing Dashboard...", ephemeral=True)
+    guild_id = str(interaction.guild_id)
+    if guild_id not in bot.cached_data:
+        bot.cached_data[guild_id] = {"tasks": [], "channel_id": interaction.channel_id, "last_menu_id": None}
+    else:
+        bot.cached_data[guild_id]["channel_id"] = interaction.channel_id
+    
+    await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
