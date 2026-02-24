@@ -76,17 +76,15 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         self.daily_check.start()
+        print(f"✅ Ready. Separating data by Server ID.")
 
     async def refresh_menu(self, guild_id, channel):
-        """Deletes the old menu and sends a new one to keep it at the bottom."""
         data = load_data()
-        
-        # Try to delete the old message
         if data.get(guild_id, {}).get("last_menu_id"):
             try:
                 old_msg = await channel.fetch_message(data[guild_id]["last_menu_id"])
                 await old_msg.delete()
-            except: pass # It's already gone or doesn't exist
+            except: pass
 
         embed = discord.Embed(
             title="📅 Grade Assignment Tracker", 
@@ -132,8 +130,6 @@ class MyBot(commands.Bot):
             
             data[guild_id]["tasks"] = updated_tasks
             save_data(data)
-
-            # If we sent alerts, the menu is now buried. Let's move it to the bottom!
             if pings_sent:
                 await self.refresh_menu(guild_id, channel)
 
@@ -144,14 +140,26 @@ bot = MyBot()
 async def setup_tracker(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     data = load_data()
-    
     if guild_id not in data:
         data[guild_id] = {"tasks": [], "last_menu_id": None}
-    
     data[guild_id]["channel_id"] = interaction.channel_id
     save_data(data)
-
     await interaction.response.send_message("Tracker Initialized!", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
+
+# --- THE TEST COMMAND ---
+@bot.tree.command(name="test_embed", description="See how the pings and setup look right now")
+async def test_embed(interaction: discord.Interaction):
+    test_embed = discord.Embed(
+        title="🔍 DIAGNOSTIC TEST",
+        description="This is a test of the assignment layout.",
+        color=discord.Color.blue()
+    )
+    test_embed.add_field(name="Subject: TEST", value="Assignment: TEST TEST TEST", inline=False)
+    test_embed.add_field(name="Status", value="🔴 ITS OVER IF YOU HAVN'T STARTED", inline=False)
+    test_embed.set_footer(text="Managed by Ryan")
+    
+    await interaction.response.send_message("Spouting test diagnostic...", ephemeral=True)
+    await interaction.channel.send(embed=test_embed)
 
 bot.run(BOT_TOKEN)
