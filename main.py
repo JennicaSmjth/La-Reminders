@@ -80,7 +80,6 @@ class AddTaskModal(ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
-        
         if not clean_date:
             return await interaction.response.send_message("❌ Invalid date! Use YYYY-MM-DD", ephemeral=True)
         
@@ -113,6 +112,7 @@ class SubjectView(ui.View):
         options=[
             discord.SelectOption(label="English", emoji="📚"),
             discord.SelectOption(label="Math", emoji="📐"),
+            discord.SelectOption(label="Science", emoji="🧪"), # <-- SCIENCE IS HERE!
             discord.SelectOption(label="Art", emoji="🎨"),
             discord.SelectOption(label="Music", emoji="🎸"),
             discord.SelectOption(label="Other", emoji="📝")
@@ -169,10 +169,10 @@ class MyBot(commands.Bot):
 
     @tasks.loop(time=time(hour=8, minute=0))
     async def daily_check(self):
-        """AUTO-NUKE OLD TASKS & SEND REMINDERS"""
+        """AUTO-CLEAR OLD TASKS & SEND REMINDERS"""
         today = datetime.now().date()
         for guild_id, info in self.cached_data.items():
-            # Auto-Nuke: Keep only tasks that are NOT in the past
+            # Auto-Clear: Keep tasks due today or in the future
             original_count = len(info["tasks"])
             info["tasks"] = [t for t in info["tasks"] if parse_date(t["due"]) >= today]
             
