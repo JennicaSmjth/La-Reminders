@@ -5,6 +5,7 @@ from datetime import datetime, time
 import json
 
 # ================= CONFIGURATION =================
+# 1. Paste your new Bot Token here:
 BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
@@ -26,7 +27,6 @@ def parse_date(date_str):
 # --- UI COMPONENTS ---
 
 class ConfirmDeleteView(ui.View):
-    """Safety confirmation before deleting a task"""
     def __init__(self, task_index, guild_id):
         super().__init__(timeout=30)
         self.task_index = task_index
@@ -48,43 +48,39 @@ class ConfirmDeleteView(ui.View):
         await interaction.response.edit_message(content="Cancelled.", view=None)
 
 class DeleteTaskSelect(ui.Select):
-    """Dropdown to choose which task to remove"""
     def __init__(self, tasks, guild_id):
         options = [
             discord.SelectOption(label=f"{t['name']}", description=f"Due: {t['due']}", value=str(i))
             for i, t in enumerate(tasks)
         ][:25]
-        super().__init__(placeholder="Select a task to remove manually...", options=options)
+        super().__init__(placeholder="Select a task to remove...", options=options)
         self.guild_id = guild_id
 
     async def callback(self, interaction: discord.Interaction):
         index = int(self.values[0])
         await interaction.response.send_message(
-            content="⚠️ Are you sure you want to remove this assignment?",
+            content="⚠️ Remove this assignment from the list?",
             view=ConfirmDeleteView(index, self.guild_id),
             ephemeral=True
         )
 
 class AddTaskModal(ui.Modal):
-    """Popup window to add assignment details"""
     def __init__(self, subject):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
 
-    name = ui.TextInput(label="Assignment Name", placeholder="e.g. History Essay", required=True)
+    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
     date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-02-26", min_length=10, max_length=10)
     info = ui.TextInput(
         label="Task Details", 
         style=discord.TextStyle.paragraph, 
-        placeholder="What do we need to do? (e.g. Read pages 10-20, upload to portal)",
+        placeholder="Instructions, links, or page numbers...",
         required=False,
         max_length=200
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
-        
-        # Validation checks
         if not clean_date:
             return await interaction.response.send_message("❌ Invalid date! Use YYYY-MM-DD", ephemeral=True)
         
@@ -109,7 +105,6 @@ class AddTaskModal(ui.Modal):
         await interaction.client.refresh_menu(guild_id, interaction.channel)
 
 class SubjectView(ui.View):
-    """The main buttons/select menu below the dashboard"""
     def __init__(self):
         super().__init__(timeout=None)
         
@@ -132,9 +127,8 @@ class SubjectView(ui.View):
         guild_id = str(interaction.guild_id)
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks:
-            return await interaction.response.send_message("Nothing to clean! 😎", ephemeral=True)
-        
-        await interaction.response.send_message("Which task is finished?", view=ui.View().add_item(DeleteTaskSelect(tasks, guild_id)), ephemeral=True)
+            return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
+        await interaction.response.send_message("Select a task to remove:", view=ui.View().add_item(DeleteTaskSelect(tasks, guild_id)), ephemeral=True)
 
 # --- THE BOT CORE ---
 
@@ -150,7 +144,6 @@ class MyBot(commands.Bot):
         self.daily_check.start()
 
     async def refresh_menu(self, guild_id, channel):
-        """Cleans up old message and sends a fresh, formatted dashboard"""
         data = self.cached_data.get(guild_id, {"tasks": [], "last_menu_id": None})
         
         embed = discord.Embed(
@@ -162,19 +155,15 @@ class MyBot(commands.Bot):
         if not data["tasks"]:
             embed.description = "No upcoming deadlines! Chill vibes only. 😎"
         else:
-            # Auto-sort tasks by date
             sorted_tasks = sorted(data["tasks"], key=lambda x: x['due'])
             for t in sorted_tasks:
-                # The Bar Separator you requested
+                # The "Card" Design with double bars
                 bar = "──────────────────"
-                field_val = f"📅 **Due:** {t['due']}\n{bar}\n📝 {t['info']}"
-                embed.add_field(
-                    name=f"📌 {t['subject'].upper()}: {t['name']}", 
-                    value=field_val, 
-                    inline=False
-                )
+                field_name = f"📌 {t['subject'].upper()}: {t['name']}"
+                field_val = f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}"
+                embed.add_field(name=field_name, value=field_val, inline=False)
 
-        # Bottom-Lock: Delete the previous dashboard
+        # Bottom-Lock: Clean up old menu
         old_id = data.get("last_menu_id")
         if old_id:
             try:
@@ -188,36 +177,29 @@ class MyBot(commands.Bot):
 
     @tasks.loop(time=time(hour=8, minute=0))
     async def daily_check(self):
-        """AUTO-CLEAR EXPIRED TASKS & SEND REMINDERS AT 8 AM"""
+        """Auto-Clear and Reminders"""
         today = datetime.now().date()
         for guild_id, info in self.cached_data.items():
-            # Auto-Clear Logic: Keep tasks if they are due TODAY or in the FUTURE (>= today)
-            original_count = len(info["tasks"])
+            # Clear yesterday's tasks
             info["tasks"] = [t for t in info["tasks"] if parse_date(t["due"]) >= today]
-            
-            if len(info["tasks"]) != original_count:
-                save_data(self.cached_data)
+            save_data(self.cached_data)
 
-            # Reminder Logic: Ping if something is due today or tomorrow
+            # Check for things due Today/Tomorrow
             urgent = [t for t in info["tasks"] if (parse_date(t["due"]) - today).days <= 1]
             channel = self.get_channel(info["channel_id"])
             if channel:
                 if urgent:
-                    await channel.send(f"⚠️ **Wake up!** You have {len(urgent)} tasks due today/tomorrow!")
+                    await channel.send(f"⚠️ **Urgent:** You have {len(urgent)} tasks due soon!")
                 await self.refresh_menu(guild_id, channel)
 
 bot = MyBot()
 
-@bot.tree.command(name="setup_tracker", description="Launch the assignment dashboard in this channel")
+@bot.tree.command(name="setup_tracker")
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    bot.cached_data[guild_id] = {
-        "channel_id": interaction.channel_id, 
-        "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []),
-        "last_menu_id": None
-    }
+    bot.cached_data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
     save_data(bot.cached_data)
-    await interaction.response.send_message("Tracker Setup Complete! Menu is launching...", ephemeral=True)
+    await interaction.response.send_message("Tracker Setup Complete!", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
