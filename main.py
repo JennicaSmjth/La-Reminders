@@ -49,37 +49,43 @@ class ConfirmDeleteView(ui.View):
 class DeleteTaskSelect(ui.Select):
     def __init__(self, tasks, guild_id):
         options = [
-            discord.SelectOption(label=f"{t['subject']}: {t['name']}", value=str(i))
+            discord.SelectOption(label=f"{t['name']}", description=f"Due: {t['due']}", value=str(i))
             for i, t in enumerate(tasks)
         ][:25]
-        super().__init__(placeholder="Select a task to mark as complete...", options=options)
+        super().__init__(placeholder="Select a task to remove manually...", options=options)
         self.guild_id = guild_id
 
     async def callback(self, interaction: discord.Interaction):
         index = int(self.values[0])
         await interaction.response.send_message(
-            content="⚠️ Are you sure you want to remove this?",
+            content="⚠️ Remove this assignment?",
             view=ConfirmDeleteView(index, self.guild_id),
             ephemeral=True
         )
-
-class ManageView(ui.View):
-    def __init__(self, tasks, guild_id):
-        super().__init__(timeout=60)
-        self.add_item(DeleteTaskSelect(tasks, guild_id))
 
 class AddTaskModal(ui.Modal):
     def __init__(self, subject):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
 
-    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Chapter 4 Quiz", required=True)
-    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-05-02")
+    name = ui.TextInput(label="Assignment Name", placeholder="e.g. History Essay", required=True)
+    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-02-26", min_length=10, max_length=10)
+    info = ui.TextInput(
+        label="Task Details", 
+        style=discord.TextStyle.paragraph, 
+        placeholder="What do we need to do? (e.g. Read pages 10-20, upload to portal)",
+        required=False,
+        max_length=200
+    )
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
+        
         if not clean_date:
-            return await interaction.response.send_message("❌ Invalid date format!", ephemeral=True)
+            return await interaction.response.send_message("❌ Invalid date! Use YYYY-MM-DD", ephemeral=True)
+        
+        if clean_date < datetime.now().date():
+            return await interaction.response.send_message("Nah why you trying to put old assignments", ephemeral=True)
 
         guild_id = str(interaction.guild_id)
         data = interaction.client.cached_data
@@ -87,7 +93,12 @@ class AddTaskModal(ui.Modal):
         if guild_id not in data:
             data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
 
-        data[guild_id]["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date)})
+        data[guild_id]["tasks"].append({
+            "subject": self.subject, 
+            "name": self.name.value, 
+            "due": str(clean_date),
+            "info": self.info.value or "No extra details provided."
+        })
         save_data(data)
         
         await interaction.response.send_message(f"✅ Added!", ephemeral=True)
@@ -115,11 +126,11 @@ class SubjectView(ui.View):
         guild_id = str(interaction.guild_id)
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks:
-            return await interaction.response.send_message("Nothing to clean! 🥳", ephemeral=True)
+            return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
         
-        await interaction.response.send_message("Which task is finished?", view=ManageView(tasks, guild_id), ephemeral=True)
+        await interaction.response.send_message("Select a task to remove:", view=ui.View().add_item(DeleteTaskSelect(tasks, guild_id)), ephemeral=True)
 
-# --- THE BOT ---
+# --- THE BOT CORE ---
 
 class MyBot(commands.Bot):
     def __init__(self):
@@ -133,52 +144,57 @@ class MyBot(commands.Bot):
         self.daily_check.start()
 
     async def refresh_menu(self, guild_id, channel):
-        """The 'Single Menu' Logic: Deletes the old one before sending the new one"""
         data = self.cached_data.get(guild_id, {"tasks": [], "last_menu_id": None})
         
-        # 1. Build the display
-        task_list = ""
+        embed = discord.Embed(title="📅 Class Assignment Tracker", color=discord.Color.blue())
+        
         if not data["tasks"]:
-            task_list = "No upcoming deadlines! Chill vibes only. 😎"
+            embed.description = "No upcoming deadlines! Chill vibes only. 😎"
         else:
-            for t in sorted(data["tasks"], key=lambda x: x['due']):
-                task_list += f"• **{t['due']}**: {t['subject']} - {t['name']}\n"
+            sorted_tasks = sorted(data["tasks"], key=lambda x: x['due'])
+            for t in sorted_tasks:
+                field_val = f"📅 **Due:** {t['due']}\n📝 {t['info']}"
+                embed.add_field(name=f"{t['subject']}: {t['name']}", value=field_val, inline=False)
 
-        embed = discord.Embed(
-            title="📅 Class Assignment Tracker", 
-            description=f"Current Deadlines:\n{task_list}", 
-            color=discord.Color.blue()
-        )
-
-        # 2. Delete the OLD menu first (if it exists)
         old_id = data.get("last_menu_id")
         if old_id:
             try:
                 msg = await channel.fetch_message(old_id)
                 await msg.delete()
-            except:
-                pass # Already deleted or not found
+            except: pass
 
-        # 3. Send the NEW menu
         new_msg = await channel.send(embed=embed, view=SubjectView())
-        
-        # 4. Save the NEW ID so we can delete it next time
         self.cached_data[guild_id]["last_menu_id"] = new_msg.id
         save_data(self.cached_data)
 
-    @tasks.loop(time=time(hour=18, minute=0)) 
+    @tasks.loop(time=time(hour=8, minute=0))
     async def daily_check(self):
-        # (Daily check logic remains the same)
-        pass
+        """AUTO-NUKE OLD TASKS & SEND REMINDERS"""
+        today = datetime.now().date()
+        for guild_id, info in self.cached_data.items():
+            # Auto-Nuke: Keep only tasks that are NOT in the past
+            original_count = len(info["tasks"])
+            info["tasks"] = [t for t in info["tasks"] if parse_date(t["due"]) >= today]
+            
+            if len(info["tasks"]) != original_count:
+                save_data(self.cached_data)
+
+            # Reminder Logic
+            urgent = [t for t in info["tasks"] if (parse_date(t["due"]) - today).days <= 1]
+            channel = self.get_channel(info["channel_id"])
+            if channel:
+                if urgent:
+                    await channel.send(f"⚠️ **Wake up!** You have {len(urgent)} tasks due today/tomorrow!")
+                await self.refresh_menu(guild_id, channel)
 
 bot = MyBot()
 
 @bot.tree.command(name="setup_tracker")
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    if guild_id not in bot.cached_data:
-        bot.cached_data[guild_id] = {"tasks": [], "channel_id": interaction.channel_id, "last_menu_id": None}
-    await interaction.response.send_message("Tracker Initialized!", ephemeral=True)
+    bot.cached_data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
+    save_data(bot.cached_data)
+    await interaction.response.send_message("Tracker Setup Complete!", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
