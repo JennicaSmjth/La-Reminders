@@ -5,6 +5,7 @@ from datetime import datetime, time
 import json
 
 # ================= CONFIGURATION =================
+# Replace with your actual Bot Token
 BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
@@ -61,8 +62,10 @@ class AddTaskModal(ui.Modal):
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
+        # Bouncer Logic: Block fake dates or non-dates
         if not clean_date:
-            return await interaction.response.send_message("❌ Invalid date! Use YYYY-MM-DD", ephemeral=True)
+            return await interaction.response.send_message("❌ That date doesn't exist. Stop trolling.", ephemeral=True)
+        # Block past dates
         if clean_date < datetime.now().date():
             return await interaction.response.send_message("Nah why you trying to put old assignments", ephemeral=True)
 
@@ -116,14 +119,17 @@ class MyBot(commands.Bot):
         else:
             for t in sorted(data["tasks"], key=lambda x: x['due']):
                 bar = "──────────────────"
-                embed.add_field(name=f"📌 {t['subject'].upper()}: {t['name']}", value=f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}", inline=False)
+                # The Card-Style bars you requested
+                embed.add_field(
+                    name=f"📌 {t['subject'].upper()}: {t['name']}", 
+                    value=f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}", 
+                    inline=False
+                )
 
-        # Anti-Duplicate: Try to delete the previous dashboard before sending the new one
+        # Anti-Duplicate check
         old_id = data.get("last_menu_id")
         if old_id:
-            try:
-                old_msg = await channel.fetch_message(old_id)
-                await old_msg.delete()
+            try: await (await channel.fetch_message(old_id)).delete()
             except: pass
 
         new_msg = await channel.send(embed=embed, view=SubjectView())
@@ -143,14 +149,24 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
+# --- THE "GHOST" CLEANER ---
+@bot.event
+async def on_guild_remove(guild):
+    """Triggers if the bot is kicked or server deleted. Cleans the JSON file."""
+    guild_id = str(guild.id)
+    if guild_id in bot.cached_data:
+        del bot.cached_data[guild_id]
+        save_data(bot.cached_data)
+
+# --- THE SETUP COMMAND ---
 @bot.tree.command(name="setup_tracker", description="Launch the assignment dashboard in this channel")
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
-    # 1. LOAD existing tasks so they aren't deleted
+    # Check for existing tasks so we don't delete them!
     existing_tasks = bot.cached_data.get(guild_id, {}).get("tasks", [])
     
-    # 2. TRACK previous message so we can delete it (No Duplicates)
+    # Find and delete old version of the dashboard message
     old_menu_id = bot.cached_data.get(guild_id, {}).get("last_menu_id")
     if old_menu_id:
         try:
@@ -158,7 +174,6 @@ async def setup(interaction: discord.Interaction):
             await m.delete()
         except: pass
 
-    # 3. SET new channel info but KEEP old tasks
     bot.cached_data[guild_id] = {
         "channel_id": interaction.channel_id, 
         "tasks": existing_tasks, 
