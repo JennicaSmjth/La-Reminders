@@ -1,11 +1,11 @@
 import discord
 from discord import ui, app_commands
 from discord.ext import commands, tasks
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 import json
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'smth' 
+BOT_TOKEN = 'I wonder whats suposed to be here' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
@@ -41,12 +41,11 @@ class PrioritySelect(ui.Select):
         if self.guild_id not in data: 
             data[self.guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
         
-        # Add the priority to the task and save
         self.task_data["priority"] = self.values[0]
         data[self.guild_id]["tasks"].append(self.task_data)
         save_data(data)
         
-        await interaction.response.edit_message(content=f"✅ Task Added: **{self.task_data['name']}** with {self.values[0]} priority!", view=None)
+        await interaction.response.edit_message(content=f"✅ Task Added: **{self.task_data['name']}**!", view=None)
         await interaction.client.refresh_menu(self.guild_id, interaction.channel)
 
 class AddTaskModal(ui.Modal):
@@ -63,7 +62,6 @@ class AddTaskModal(ui.Modal):
         if not clean_date:
             return await interaction.response.send_message("❌ Invalid date format.", ephemeral=True)
         
-        # Prepare the task data but don't save yet
         task_data = {
             "subject": self.subject,
             "name": self.name.value,
@@ -71,34 +69,8 @@ class AddTaskModal(ui.Modal):
             "info": self.info.value or "No details."
         }
         
-        # Send the Priority Dropdown (Step 2)
         view = ui.View().add_item(PrioritySelect(task_data, str(interaction.guild_id)))
-        await interaction.response.send_message("Select the priority for this assignment:", view=view, ephemeral=True)
-
-class ConfirmDeleteView(ui.View):
-    def __init__(self, task_index, guild_id):
-        super().__init__(timeout=30)
-        self.task_index = task_index
-        self.guild_id = guild_id
-
-    @ui.button(label="Confirm Cleanup", style=discord.ButtonStyle.success)
-    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
-        data = interaction.client.cached_data
-        if self.guild_id in data and len(data[self.guild_id]["tasks"]) > self.task_index:
-            removed = data[self.guild_id]["tasks"].pop(self.task_index)
-            save_data(data)
-            await interaction.response.edit_message(content=f"✅ Removed: **{removed['name']}**", view=None)
-            await interaction.client.refresh_menu(self.guild_id, interaction.channel)
-
-class DeleteTaskSelect(ui.Select):
-    def __init__(self, tasks, guild_id):
-        options = [discord.SelectOption(label=f"{t['name']}", description=f"Due: {t['due']}", value=str(i)) for i, t in enumerate(tasks)][:25]
-        super().__init__(placeholder="Select a task to remove...", options=options)
-        self.guild_id = guild_id
-
-    async def callback(self, interaction: discord.Interaction):
-        index = int(self.values[0])
-        await interaction.response.send_message(content="⚠️ Remove this?", view=ConfirmDeleteView(index, self.guild_id), ephemeral=True)
+        await interaction.response.send_message("Last step: Select Priority level", view=view, ephemeral=True)
 
 class SubjectView(ui.View):
     def __init__(self):
@@ -120,7 +92,20 @@ class SubjectView(ui.View):
         guild_id = str(interaction.guild_id)
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks: return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
-        await interaction.response.send_message("Select to remove:", view=ui.View().add_item(DeleteTaskSelect(tasks, guild_id)), ephemeral=True)
+        
+        # Simple Select for deletion
+        options = [discord.SelectOption(label=f"{t['name']}", value=str(i)) for i, t in enumerate(tasks)][:25]
+        del_select = ui.Select(placeholder="Select to remove...", options=options)
+        
+        async def del_callback(idx_interaction):
+            idx = int(del_select.values[0])
+            interaction.client.cached_data[guild_id]["tasks"].pop(idx)
+            save_data(interaction.client.cached_data)
+            await idx_interaction.response.send_message("✅ Removed.", ephemeral=True)
+            await interaction.client.refresh_menu(guild_id, interaction.channel)
+
+        del_select.callback = del_callback
+        await interaction.response.send_message("Delete a task:", view=ui.View().add_item(del_select), ephemeral=True)
 
 # --- THE BOT CORE ---
 
@@ -144,11 +129,10 @@ class MyBot(commands.Bot):
             embed.description = "No upcoming deadlines! Chill vibes only. 😎"
         else:
             for t in sorted(data["tasks"], key=lambda x: x['due']):
-                bar = "──────────────────"
                 p_label = t.get("priority", "🟡 MED")
                 embed.add_field(
                     name=f"📌 {t['subject'].upper()}: {t['name']} [{p_label}]", 
-                    value=f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}", 
+                    value=f"📅 **Due:** {t['due']}\n📝 {t['info']}\n──────────────────", 
                     inline=False
                 )
 
@@ -166,74 +150,61 @@ class MyBot(commands.Bot):
     def get_urgent_embed(self, guild_id, day_range):
         info = self.cached_data.get(guild_id)
         if not info: return None
-
         today = datetime.now().date()
-        urgent_tasks = []
-        for t in info["tasks"]:
-            due_date = parse_date(t['due'])
-            if due_date:
-                diff = (due_date - today).days
-                if 0 <= diff <= day_range:
-                    urgent_tasks.append((t, diff))
-
-        if not urgent_tasks: return None
-
+        urgent = [(t, (parse_date(t['due']) - today).days) for t in info["tasks"] if 0 <= (parse_date(t['due']) - today).days <= day_range]
+        if not urgent: return None
+        
         embed = discord.Embed(title="⚠️ ASSIGNMENTS DUE SOON", color=discord.Color.red())
         embed.set_footer(text="Managed by Ryan")
-        for t, days in urgent_tasks:
+        for t, days in urgent:
             time_str = "DUE TODAY! 🚨" if days == 0 else f"{days} day(s) left"
-            p_label = t.get("priority", "🟡 MED")
-            embed.add_field(
-                name=f"🛑 {t['subject']}: {t['name']} [{p_label}]",
-                value=f"**Time Left:** {time_str}\n**Date:** {t['due']}",
-                inline=False
-            )
+            embed.add_field(name=f"🛑 {t['name']} [{t.get('priority', '🟡 MED')}]", value=f"**Time:** {time_str}\n**Date:** {t['due']}", inline=False)
         return embed
 
     @tasks.loop(time=time(hour=14, minute=30)) 
     async def daily_check(self):
         today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
         for guild_id in list(self.cached_data.keys()):
             self.cached_data[guild_id]["tasks"] = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) >= today]
             save_data(self.cached_data)
-            
             chan = self.get_channel(int(self.cached_data[guild_id]["channel_id"]))
             if chan:
-                remind_embed = self.get_urgent_embed(guild_id, 7)
-                if remind_embed: await chan.send(embed=remind_embed)
+                # High Priority @everyone Ping
+                hp = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) == tomorrow and "HIGH" in t.get("priority", "")]
+                if hp: await chan.send(f"🚨 @everyone **URGENT:** {', '.join([t['name'] for t in hp])} is due TOMORROW! 🚨")
+                
+                remind = self.get_urgent_embed(guild_id, 7)
+                if remind: await chan.send(embed=remind)
                 await self.refresh_menu(guild_id, chan)
 
 bot = MyBot()
 
+@bot.tree.command(name="what", description="Quick manual for the bot")
+async def what(interaction: discord.Interaction):
+    embed = discord.Embed(title="📘 Ryan's Bot: Quick Guide", color=discord.Color.blue())
+    embed.add_field(name="The Logic", value="• **Blue List:** Permanent dashboard. Auto-cleans at 8am.\n• **Red Alert:** Daily 2:30pm check (7 days out).\n• **🚨 High Priority:** Pings @everyone 1 day before due.", inline=False)
+    embed.add_field(name="Commands", value="• `/remind_now`: Private 3-day check.\n• `/setup_tracker`: Reset dashboard (Admin).", inline=False)
+    embed.set_footer(text="Managed by Ryan")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="remind_now", description="Private 3-day check")
 async def remind_now(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    remind_embed = bot.get_urgent_embed(guild_id, 3)
-    if remind_embed:
-        await interaction.response.send_message(embed=remind_embed, ephemeral=True)
-    else:
-        await interaction.response.send_message("Nothing due in 3 days!", ephemeral=True)
+    remind = bot.get_urgent_embed(str(interaction.guild_id), 3)
+    await interaction.response.send_message(embed=remind if remind else None, content="Nothing due soon!" if not remind else None, ephemeral=True)
 
-@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin Only)")
+@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    old_data = bot.cached_data.get(guild_id, {})
-    
-    old_id = old_data.get("last_menu_id")
+    old_id = bot.cached_data.get(guild_id, {}).get("last_menu_id")
     if old_id:
         try:
             m = await interaction.channel.fetch_message(old_id)
             await m.delete()
         except: pass
-
-    bot.cached_data[guild_id] = {
-        "channel_id": interaction.channel_id, 
-        "tasks": old_data.get("tasks", []), 
-        "last_menu_id": None 
-    }
-    save_data(bot.cached_data)
-    await interaction.response.send_message("Setup complete!", ephemeral=True)
+    bot.cached_data[guild_id] = {"channel_id": interaction.channel_id, "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []), "last_menu_id": None}
+    await interaction.response.send_message("Dashboard resetting...", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
