@@ -5,7 +5,7 @@ from datetime import datetime, time
 import json
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'BOT_TOKEN' 
+BOT_TOKEN = 'right here' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
@@ -24,6 +24,56 @@ def parse_date(date_str):
     return None
 
 # --- UI COMPONENTS ---
+
+class PrioritySelect(ui.Select):
+    def __init__(self, task_data, guild_id):
+        options = [
+            discord.SelectOption(label="High Priority", emoji="🔴", value="🔴 HIGH"),
+            discord.SelectOption(label="Medium Priority", emoji="🟡", value="🟡 MED"),
+            discord.SelectOption(label="Low Priority", emoji="🟢", value="🟢 LOW")
+        ]
+        super().__init__(placeholder="Choose priority level...", options=options)
+        self.task_data = task_data
+        self.guild_id = guild_id
+
+    async def callback(self, interaction: discord.Interaction):
+        data = interaction.client.cached_data
+        if self.guild_id not in data: 
+            data[self.guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
+        
+        # Add the priority to the task and save
+        self.task_data["priority"] = self.values[0]
+        data[self.guild_id]["tasks"].append(self.task_data)
+        save_data(data)
+        
+        await interaction.response.edit_message(content=f"✅ Task Added: **{self.task_data['name']}** with {self.values[0]} priority!", view=None)
+        await interaction.client.refresh_menu(self.guild_id, interaction.channel)
+
+class AddTaskModal(ui.Modal):
+    def __init__(self, subject):
+        super().__init__(title=f"New {subject} Task")
+        self.subject = subject
+
+    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
+    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
+    info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions...", required=False, max_length=200)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        clean_date = parse_date(self.date.value)
+        if not clean_date:
+            return await interaction.response.send_message("❌ Invalid date format.", ephemeral=True)
+        
+        # Prepare the task data but don't save yet
+        task_data = {
+            "subject": self.subject,
+            "name": self.name.value,
+            "due": str(clean_date),
+            "info": self.info.value or "No details."
+        }
+        
+        # Send the Priority Dropdown (Step 2)
+        view = ui.View().add_item(PrioritySelect(task_data, str(interaction.guild_id)))
+        await interaction.response.send_message("Select the priority for this assignment:", view=view, ephemeral=True)
 
 class ConfirmDeleteView(ui.View):
     def __init__(self, task_index, guild_id):
@@ -49,31 +99,6 @@ class DeleteTaskSelect(ui.Select):
     async def callback(self, interaction: discord.Interaction):
         index = int(self.values[0])
         await interaction.response.send_message(content="⚠️ Remove this?", view=ConfirmDeleteView(index, self.guild_id), ephemeral=True)
-
-class AddTaskModal(ui.Modal):
-    def __init__(self, subject):
-        super().__init__(title=f"New {subject} Task")
-        self.subject = subject
-
-    name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
-    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
-    info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions...", required=False, max_length=200)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        clean_date = parse_date(self.date.value)
-        if not clean_date:
-            return await interaction.response.send_message("❌ Invalid date format.", ephemeral=True)
-        if clean_date < datetime.now().date():
-            return await interaction.response.send_message("Nah why you trying to put old assignments", ephemeral=True)
-
-        guild_id = str(interaction.guild_id)
-        data = interaction.client.cached_data
-        if guild_id not in data: data[guild_id] = {"channel_id": interaction.channel_id, "tasks": [], "last_menu_id": None}
-
-        data[guild_id]["tasks"].append({"subject": self.subject, "name": self.name.value, "due": str(clean_date), "info": self.info.value or "No details."})
-        save_data(data)
-        await interaction.response.send_message(f"✅ Added {self.name.value}!", ephemeral=True)
-        await interaction.client.refresh_menu(guild_id, interaction.channel)
 
 class SubjectView(ui.View):
     def __init__(self):
@@ -120,8 +145,9 @@ class MyBot(commands.Bot):
         else:
             for t in sorted(data["tasks"], key=lambda x: x['due']):
                 bar = "──────────────────"
+                p_label = t.get("priority", "🟡 MED")
                 embed.add_field(
-                    name=f"📌 {t['subject'].upper()}: {t['name']}", 
+                    name=f"📌 {t['subject'].upper()}: {t['name']} [{p_label}]", 
                     value=f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}", 
                     inline=False
                 )
@@ -156,8 +182,9 @@ class MyBot(commands.Bot):
         embed.set_footer(text="Managed by Ryan")
         for t, days in urgent_tasks:
             time_str = "DUE TODAY! 🚨" if days == 0 else f"{days} day(s) left"
+            p_label = t.get("priority", "🟡 MED")
             embed.add_field(
-                name=f"🛑 {t['subject']}: {t['name']}",
+                name=f"🛑 {t['subject']}: {t['name']} [{p_label}]",
                 value=f"**Time Left:** {time_str}\n**Date:** {t['due']}",
                 inline=False
             )
@@ -193,7 +220,6 @@ async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     old_data = bot.cached_data.get(guild_id, {})
     
-    # Logic to clear old dashboard on setup
     old_id = old_data.get("last_menu_id")
     if old_id:
         try:
@@ -207,7 +233,7 @@ async def setup(interaction: discord.Interaction):
         "last_menu_id": None 
     }
     save_data(bot.cached_data)
-    await interaction.response.send_message("Setup complete. Refreshing dashboard...", ephemeral=True)
+    await interaction.response.send_message("Setup complete!", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
