@@ -5,7 +5,7 @@ from datetime import datetime, time, timedelta
 import json
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'I wonder whats suposed to be here' 
+BOT_TOKEN = 'huh' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
