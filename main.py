@@ -6,7 +6,7 @@ import json
 import asyncio
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'huh' 
+BOT_TOKEN = 'huh' # PLEASE REPLACE AND KEEP SECRET
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
@@ -82,7 +82,7 @@ class SubjectView(ui.View):
     @ui.button(label="✨ Clean up List", style=discord.ButtonStyle.secondary)
     async def manage_tasks(self, interaction: discord.Interaction, button: ui.Button):
         if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("Admins only.", ephemeral=True)
+            return await interaction.response.send_message("too bad u dont have admin", ephemeral=True)
             
         guild_id = str(interaction.guild_id)
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
@@ -112,15 +112,15 @@ class MyBot(commands.Bot):
         self.is_refreshing = False 
 
     async def setup_hook(self):
-        await self.tree.sync()
         self.daily_check.start()
+        await self.tree.sync()
 
     async def refresh_menu(self, guild_id, channel):
         data = self.cached_data.get(guild_id, {"tasks": [], "last_menu_id": None})
         embed = discord.Embed(title="📅 Class Assignment Tracker", description="*Current active deadlines:*", color=discord.Color.blue())
         embed.set_footer(text="Managed by Ryan")
         
-        if not data["tasks"]:
+        if not data.get("tasks"):
             embed.description = "No upcoming deadlines! Chill vibes only. 😎"
         else:
             for t in sorted(data["tasks"], key=lambda x: x['due']):
@@ -159,38 +159,47 @@ class MyBot(commands.Bot):
     @tasks.loop(time=time(hour=14, minute=30)) 
     async def daily_check(self):
         today = datetime.now().date()
-        tomorrow = today + timedelta(days=1)
         for guild_id in list(self.cached_data.keys()):
             self.cached_data[guild_id]["tasks"] = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) >= today]
             save_data(self.cached_data)
-            chan = self.get_channel(int(self.cached_data[guild_id]["channel_id"]))
-            if chan:
-                hp = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) == tomorrow and "HIGH" in t.get("priority", "")]
-                if hp: await chan.send(f"🚨 @everyone **URGENT:** {', '.join([t['name'] for t in hp])} is due TOMORROW! 🚨")
-                remind = self.get_urgent_embed(guild_id, 7)
-                if remind: await chan.send(embed=remind)
-                await self.refresh_menu(guild_id, chan)
+            chan_id = self.cached_data[guild_id].get("channel_id")
+            if chan_id:
+                chan = self.get_channel(int(chan_id))
+                if chan:
+                    # Refreshing logic...
+                    await self.refresh_menu(guild_id, chan)
 
 bot = MyBot()
 
-@bot.event
-async def on_message(message):
-    if message.author == bot.user: return
-    guild_id = str(message.guild.id)
-    data = bot.cached_data.get(guild_id)
-    if data and str(message.channel.id) == str(data.get("channel_id")):
-        if not bot.is_refreshing:
-            bot.is_refreshing = True
-            await bot.refresh_menu(guild_id, message.channel)
-            bot.is_refreshing = False
-    await bot.process_commands(message)
+# --- COMMANDS ---
+
+@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
+@app_commands.checks.has_permissions(administrator=True)
+async def setup(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    
+    # Check if a dashboard already exists
+    if guild_id in bot.cached_data and bot.cached_data[guild_id].get("channel_id"):
+        return await interaction.response.send_message("theres already one u bum", ephemeral=True)
+
+    bot.cached_data[guild_id] = {
+        "channel_id": interaction.channel_id, 
+        "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []), 
+        "last_menu_id": None
+    }
+    await interaction.response.send_message("Setting up dashboard...", ephemeral=True)
+    await bot.refresh_menu(guild_id, interaction.channel)
+
+# Error handler for when someone lacks permissions
+@setup.error
+async def setup_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message("imagine not having admin L", ephemeral=True)
 
 @bot.tree.command(name="what", description="Quick manual for the bot")
 async def what(interaction: discord.Interaction):
     embed = discord.Embed(title="📘 Ryan's Bot: Quick Guide", color=discord.Color.blue())
-    embed.add_field(name="The Logic", value="• **Blue List:** Permanent dashboard. Auto-cleans at 8am.\n• **Red Alert:** Daily 2:30pm check.\n• **🚨 High Priority:** Pings @everyone 1 day before due.", inline=False)
-    embed.add_field(name="Commands", value="• `/remind_now`: Private 3-day check.\n• `/setup_tracker`: Reset dashboard (Admin).", inline=False)
-    embed.set_footer(text="Managed by Ryan")
+    embed.add_field(name="Commands", value="• `/remind_now`: Private 3-day check.\n• `/setup_tracker`: Launch dashboard (Admin).", inline=False)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remind_now", description="Private 3-day check")
@@ -199,14 +208,6 @@ async def remind_now(interaction: discord.Interaction):
     if remind:
         await interaction.response.send_message(embed=remind, ephemeral=True)
     else:
-        await interaction.response.send_message("Chill vibes! Nothing due in the next 3 days. 😎", ephemeral=True)
-
-@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
-@app_commands.checks.has_permissions(administrator=True)
-async def setup(interaction: discord.Interaction):
-    guild_id = str(interaction.guild_id)
-    bot.cached_data[guild_id] = {"channel_id": interaction.channel_id, "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []), "last_menu_id": None}
-    await interaction.response.send_message("Dashboard resetting...", ephemeral=True)
-    await bot.refresh_menu(guild_id, interaction.channel)
+        await interaction.response.send_message("Chill vibes! Nothing due in 3 days. 😎", ephemeral=True)
 
 bot.run(BOT_TOKEN)
