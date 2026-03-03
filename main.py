@@ -5,7 +5,7 @@ from datetime import datetime, time
 import json
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'right here' 
+BOT_TOKEN = 'smth' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
