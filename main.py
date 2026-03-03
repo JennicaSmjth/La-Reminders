@@ -62,13 +62,7 @@ class AddTaskModal(ui.Modal):
         if not clean_date:
             return await interaction.response.send_message("❌ Invalid date format.", ephemeral=True)
         
-        task_data = {
-            "subject": self.subject,
-            "name": self.name.value,
-            "due": str(clean_date),
-            "info": self.info.value or "No details."
-        }
-        
+        task_data = {"subject": self.subject, "name": self.name.value, "due": str(clean_date), "info": self.info.value or "No details."}
         view = ui.View().add_item(PrioritySelect(task_data, str(interaction.guild_id)))
         await interaction.response.send_message("Last step: Select Priority level", view=view, ephemeral=True)
 
@@ -93,7 +87,6 @@ class SubjectView(ui.View):
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks: return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
         
-        # Simple Select for deletion
         options = [discord.SelectOption(label=f"{t['name']}", value=str(i)) for i, t in enumerate(tasks)][:25]
         del_select = ui.Select(placeholder="Select to remove...", options=options)
         
@@ -158,7 +151,7 @@ class MyBot(commands.Bot):
         embed.set_footer(text="Managed by Ryan")
         for t, days in urgent:
             time_str = "DUE TODAY! 🚨" if days == 0 else f"{days} day(s) left"
-            embed.add_field(name=f"🛑 {t['name']} [{t.get('priority', '🟡 MED')}]", value=f"**Time:** {time_str}\n**Date:** {t['due']}", inline=False)
+            embed.add_field(name=f"🛑 {t['name']} [{t.get('priority', '🟡 MED')}]", value=f"**Time:** {time_str}\n**Date:** {t['due']}\n──────────────────", inline=False)
         return embed
 
     @tasks.loop(time=time(hour=14, minute=30)) 
@@ -170,20 +163,27 @@ class MyBot(commands.Bot):
             save_data(self.cached_data)
             chan = self.get_channel(int(self.cached_data[guild_id]["channel_id"]))
             if chan:
-                # High Priority @everyone Ping
                 hp = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) == tomorrow and "HIGH" in t.get("priority", "")]
                 if hp: await chan.send(f"🚨 @everyone **URGENT:** {', '.join([t['name'] for t in hp])} is due TOMORROW! 🚨")
-                
                 remind = self.get_urgent_embed(guild_id, 7)
                 if remind: await chan.send(embed=remind)
                 await self.refresh_menu(guild_id, chan)
 
 bot = MyBot()
 
+@bot.event
+async def on_message(message):
+    if message.author == bot.user: return
+    guild_id = str(message.guild.id)
+    data = bot.cached_data.get(guild_id)
+    if data and str(message.channel.id) == str(data.get("channel_id")):
+        await bot.refresh_menu(guild_id, message.channel)
+    await bot.process_commands(message)
+
 @bot.tree.command(name="what", description="Quick manual for the bot")
 async def what(interaction: discord.Interaction):
     embed = discord.Embed(title="📘 Ryan's Bot: Quick Guide", color=discord.Color.blue())
-    embed.add_field(name="The Logic", value="• **Blue List:** Permanent dashboard. Auto-cleans at 8am.\n• **Red Alert:** Daily 2:30pm check (7 days out).\n• **🚨 High Priority:** Pings @everyone 1 day before due.", inline=False)
+    embed.add_field(name="The Logic", value="• **Blue List:** Permanent dashboard. Auto-cleans at 8am.\n• **Red Alert:** Daily 2:30pm check.\n• **🚨 High Priority:** Pings @everyone 1 day before due.", inline=False)
     embed.add_field(name="Commands", value="• `/remind_now`: Private 3-day check.\n• `/setup_tracker`: Reset dashboard (Admin).", inline=False)
     embed.set_footer(text="Managed by Ryan")
     await interaction.response.send_message(embed=embed, ephemeral=True)
