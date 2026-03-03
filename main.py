@@ -5,8 +5,7 @@ from datetime import datetime, time
 import json
 
 # ================= CONFIGURATION =================
-# Replace with your actual Bot Token
-BOT_TOKEN = 'PASTE_YOUR_TOKEN_HERE' 
+BOT_TOKEN = 'BOT_TOKEN' 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
@@ -35,7 +34,7 @@ class ConfirmDeleteView(ui.View):
     @ui.button(label="Confirm Cleanup", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: ui.Button):
         data = interaction.client.cached_data
-        if len(data[self.guild_id]["tasks"]) > self.task_index:
+        if self.guild_id in data and len(data[self.guild_id]["tasks"]) > self.task_index:
             removed = data[self.guild_id]["tasks"].pop(self.task_index)
             save_data(data)
             await interaction.response.edit_message(content=f"✅ Removed: **{removed['name']}**", view=None)
@@ -57,15 +56,13 @@ class AddTaskModal(ui.Modal):
         self.subject = subject
 
     name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
-    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-02-26", min_length=10, max_length=10)
-    info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions, links...", required=False, max_length=200)
+    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
+    info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions...", required=False, max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
         clean_date = parse_date(self.date.value)
-        # Bouncer Logic: Block fake dates or non-dates
         if not clean_date:
-            return await interaction.response.send_message("❌ That date doesn't exist. Stop trolling.", ephemeral=True)
-        # Block past dates
+            return await interaction.response.send_message("❌ Invalid date format.", ephemeral=True)
         if clean_date < datetime.now().date():
             return await interaction.response.send_message("Nah why you trying to put old assignments", ephemeral=True)
 
@@ -92,6 +89,9 @@ class SubjectView(ui.View):
 
     @ui.button(label="✨ Clean up List", style=discord.ButtonStyle.secondary)
     async def manage_tasks(self, interaction: discord.Interaction, button: ui.Button):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("Admins only.", ephemeral=True)
+            
         guild_id = str(interaction.guild_id)
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks: return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
@@ -113,75 +113,101 @@ class MyBot(commands.Bot):
     async def refresh_menu(self, guild_id, channel):
         data = self.cached_data.get(guild_id, {"tasks": [], "last_menu_id": None})
         embed = discord.Embed(title="📅 Class Assignment Tracker", description="*Current active deadlines:*", color=discord.Color.blue())
+        embed.set_footer(text="Managed by Ryan")
         
         if not data["tasks"]:
             embed.description = "No upcoming deadlines! Chill vibes only. 😎"
         else:
             for t in sorted(data["tasks"], key=lambda x: x['due']):
                 bar = "──────────────────"
-                # The Card-Style bars you requested
                 embed.add_field(
                     name=f"📌 {t['subject'].upper()}: {t['name']}", 
                     value=f"{bar}\n📅 **Due:** {t['due']}\n📝 {t['info']}\n{bar}", 
                     inline=False
                 )
 
-        # Anti-Duplicate check
         old_id = data.get("last_menu_id")
         if old_id:
-            try: await (await channel.fetch_message(old_id)).delete()
+            try:
+                msg = await channel.fetch_message(old_id)
+                await msg.delete()
             except: pass
 
         new_msg = await channel.send(embed=embed, view=SubjectView())
         self.cached_data[guild_id]["last_menu_id"] = new_msg.id
         save_data(self.cached_data)
 
-    @tasks.loop(time=time(hour=8, minute=0))
+    def get_urgent_embed(self, guild_id, day_range):
+        info = self.cached_data.get(guild_id)
+        if not info: return None
+
+        today = datetime.now().date()
+        urgent_tasks = []
+        for t in info["tasks"]:
+            due_date = parse_date(t['due'])
+            if due_date:
+                diff = (due_date - today).days
+                if 0 <= diff <= day_range:
+                    urgent_tasks.append((t, diff))
+
+        if not urgent_tasks: return None
+
+        embed = discord.Embed(title="⚠️ ASSIGNMENTS DUE SOON", color=discord.Color.red())
+        embed.set_footer(text="Managed by Ryan")
+        for t, days in urgent_tasks:
+            time_str = "DUE TODAY! 🚨" if days == 0 else f"{days} day(s) left"
+            embed.add_field(
+                name=f"🛑 {t['subject']}: {t['name']}",
+                value=f"**Time Left:** {time_str}\n**Date:** {t['due']}",
+                inline=False
+            )
+        return embed
+
+    @tasks.loop(time=time(hour=14, minute=30)) 
     async def daily_check(self):
         today = datetime.now().date()
-        for guild_id, info in self.cached_data.items():
-            info["tasks"] = [t for t in info["tasks"] if parse_date(t["due"]) >= today]
+        for guild_id in list(self.cached_data.keys()):
+            self.cached_data[guild_id]["tasks"] = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) >= today]
             save_data(self.cached_data)
-            urgent = [t for t in info["tasks"] if (parse_date(t['due']) - today).days <= 1]
-            if (chan := self.get_channel(info["channel_id"])):
-                if urgent: await chan.send(f"⚠️ **Urgent:** {len(urgent)} tasks due soon!")
+            
+            chan = self.get_channel(int(self.cached_data[guild_id]["channel_id"]))
+            if chan:
+                remind_embed = self.get_urgent_embed(guild_id, 7)
+                if remind_embed: await chan.send(embed=remind_embed)
                 await self.refresh_menu(guild_id, chan)
 
 bot = MyBot()
 
-# --- THE "GHOST" CLEANER ---
-@bot.event
-async def on_guild_remove(guild):
-    """Triggers if the bot is kicked or server deleted. Cleans the JSON file."""
-    guild_id = str(guild.id)
-    if guild_id in bot.cached_data:
-        del bot.cached_data[guild_id]
-        save_data(bot.cached_data)
+@bot.tree.command(name="remind_now", description="Private 3-day check")
+async def remind_now(interaction: discord.Interaction):
+    guild_id = str(interaction.guild_id)
+    remind_embed = bot.get_urgent_embed(guild_id, 3)
+    if remind_embed:
+        await interaction.response.send_message(embed=remind_embed, ephemeral=True)
+    else:
+        await interaction.response.send_message("Nothing due in 3 days!", ephemeral=True)
 
-# --- THE SETUP COMMAND ---
-@bot.tree.command(name="setup_tracker", description="Launch the assignment dashboard in this channel")
+@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin Only)")
+@app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
+    old_data = bot.cached_data.get(guild_id, {})
     
-    # Check for existing tasks so we don't delete them!
-    existing_tasks = bot.cached_data.get(guild_id, {}).get("tasks", [])
-    
-    # Find and delete old version of the dashboard message
-    old_menu_id = bot.cached_data.get(guild_id, {}).get("last_menu_id")
-    if old_menu_id:
+    # Logic to clear old dashboard on setup
+    old_id = old_data.get("last_menu_id")
+    if old_id:
         try:
-            m = await interaction.channel.fetch_message(old_menu_id)
+            m = await interaction.channel.fetch_message(old_id)
             await m.delete()
         except: pass
 
     bot.cached_data[guild_id] = {
         "channel_id": interaction.channel_id, 
-        "tasks": existing_tasks, 
+        "tasks": old_data.get("tasks", []), 
         "last_menu_id": None 
     }
     save_data(bot.cached_data)
-    
-    await interaction.response.send_message("Tracker Setup Complete! Cleaning up old menus...", ephemeral=True)
+    await interaction.response.send_message("Setup complete. Refreshing dashboard...", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
 bot.run(BOT_TOKEN)
