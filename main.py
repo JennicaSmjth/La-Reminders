@@ -3,6 +3,7 @@ from discord import ui, app_commands
 from discord.ext import commands, tasks
 from datetime import datetime, time, timedelta
 import json
+import asyncio
 
 # ================= CONFIGURATION =================
 BOT_TOKEN = 'huh' 
@@ -108,6 +109,7 @@ class MyBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.cached_data = load_data()
+        self.is_refreshing = False 
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -132,8 +134,8 @@ class MyBot(commands.Bot):
         old_id = data.get("last_menu_id")
         if old_id:
             try:
-                msg = await channel.fetch_message(old_id)
-                await msg.delete()
+                msg_to_del = channel.get_partial_message(old_id)
+                asyncio.create_task(msg_to_del.delete()) 
             except: pass
 
         new_msg = await channel.send(embed=embed, view=SubjectView())
@@ -142,7 +144,7 @@ class MyBot(commands.Bot):
 
     def get_urgent_embed(self, guild_id, day_range):
         info = self.cached_data.get(guild_id)
-        if not info: return None
+        if not info or "tasks" not in info: return None
         today = datetime.now().date()
         urgent = [(t, (parse_date(t['due']) - today).days) for t in info["tasks"] if 0 <= (parse_date(t['due']) - today).days <= day_range]
         if not urgent: return None
@@ -177,7 +179,10 @@ async def on_message(message):
     guild_id = str(message.guild.id)
     data = bot.cached_data.get(guild_id)
     if data and str(message.channel.id) == str(data.get("channel_id")):
-        await bot.refresh_menu(guild_id, message.channel)
+        if not bot.is_refreshing:
+            bot.is_refreshing = True
+            await bot.refresh_menu(guild_id, message.channel)
+            bot.is_refreshing = False
     await bot.process_commands(message)
 
 @bot.tree.command(name="what", description="Quick manual for the bot")
@@ -191,18 +196,15 @@ async def what(interaction: discord.Interaction):
 @bot.tree.command(name="remind_now", description="Private 3-day check")
 async def remind_now(interaction: discord.Interaction):
     remind = bot.get_urgent_embed(str(interaction.guild_id), 3)
-    await interaction.response.send_message(embed=remind if remind else None, content="Nothing due soon!" if not remind else None, ephemeral=True)
+    if remind:
+        await interaction.response.send_message(embed=remind, ephemeral=True)
+    else:
+        await interaction.response.send_message("Chill vibes! Nothing due in the next 3 days. 😎", ephemeral=True)
 
 @bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
-    old_id = bot.cached_data.get(guild_id, {}).get("last_menu_id")
-    if old_id:
-        try:
-            m = await interaction.channel.fetch_message(old_id)
-            await m.delete()
-        except: pass
     bot.cached_data[guild_id] = {"channel_id": interaction.channel_id, "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []), "last_menu_id": None}
     await interaction.response.send_message("Dashboard resetting...", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
