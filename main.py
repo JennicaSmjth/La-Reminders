@@ -6,7 +6,7 @@ import json
 import asyncio
 
 # ================= CONFIGURATION =================
-BOT_TOKEN = 'huh' # PLEASE REPLACE AND KEEP SECRET
+BOT_TOKEN = 'huh' # this is ur bot token. Keep it safe 
 ASSIGNMENT_FILE = "grade_tasks.json"
 # =================================================
 
@@ -109,7 +109,6 @@ class MyBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.cached_data = load_data()
-        self.is_refreshing = False 
 
     async def setup_hook(self):
         self.daily_check.start()
@@ -117,6 +116,24 @@ class MyBot(commands.Bot):
 
     async def refresh_menu(self, guild_id, channel):
         data = self.cached_data.get(guild_id, {"tasks": [], "last_menu_id": None})
+        
+        # --- SMART CLEANUP ---
+        # Look for the old dashboard to delete it before sending a new one
+        old_id = data.get("last_menu_id")
+        if old_id:
+            try:
+                msg_to_del = await channel.fetch_message(old_id)
+                await msg_to_del.delete()
+            except:
+                # If message is already gone or ID is invalid, scan history for stray dashboards
+                async for message in channel.history(limit=15):
+                    if message.author == self.user and message.embeds:
+                        if "Class Assignment Tracker" in message.embeds[0].title:
+                            try: await message.delete()
+                            except: pass
+                            break
+
+        # --- CREATE EMBED ---
         embed = discord.Embed(title="📅 Class Assignment Tracker", description="*Current active deadlines:*", color=discord.Color.blue())
         embed.set_footer(text="Managed by Ryan")
         
@@ -131,15 +148,13 @@ class MyBot(commands.Bot):
                     inline=False
                 )
 
-        old_id = data.get("last_menu_id")
-        if old_id:
-            try:
-                msg_to_del = channel.get_partial_message(old_id)
-                asyncio.create_task(msg_to_del.delete()) 
-            except: pass
-
+        # Send new dashboard and update JSON
         new_msg = await channel.send(embed=embed, view=SubjectView())
+        if guild_id not in self.cached_data:
+            self.cached_data[guild_id] = {"tasks": []}
+            
         self.cached_data[guild_id]["last_menu_id"] = new_msg.id
+        self.cached_data[guild_id]["channel_id"] = channel.id
         save_data(self.cached_data)
 
     def get_urgent_embed(self, guild_id, day_range):
@@ -160,37 +175,34 @@ class MyBot(commands.Bot):
     async def daily_check(self):
         today = datetime.now().date()
         for guild_id in list(self.cached_data.keys()):
+            # Filter out old tasks
             self.cached_data[guild_id]["tasks"] = [t for t in self.cached_data[guild_id]["tasks"] if parse_date(t["due"]) >= today]
             save_data(self.cached_data)
+            
             chan_id = self.cached_data[guild_id].get("channel_id")
             if chan_id:
                 chan = self.get_channel(int(chan_id))
                 if chan:
-                    # Refreshing logic...
                     await self.refresh_menu(guild_id, chan)
 
 bot = MyBot()
 
 # --- COMMANDS ---
 
-@bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
+@bot.tree.command(name="setup_tracker", description="Launch/Move dashboard (Admin)")
 @app_commands.checks.has_permissions(administrator=True)
 async def setup(interaction: discord.Interaction):
     guild_id = str(interaction.guild_id)
     
-    # Check if a dashboard already exists
-    if guild_id in bot.cached_data and bot.cached_data[guild_id].get("channel_id"):
-        return await interaction.response.send_message("theres already one u bum", ephemeral=True)
+    # We don't block anymore. Running this command just "re-centers" the bot here.
+    if guild_id not in bot.cached_data:
+        bot.cached_data[guild_id] = {"tasks": [], "last_menu_id": None}
 
-    bot.cached_data[guild_id] = {
-        "channel_id": interaction.channel_id, 
-        "tasks": bot.cached_data.get(guild_id, {}).get("tasks", []), 
-        "last_menu_id": None
-    }
-    await interaction.response.send_message("Setting up dashboard...", ephemeral=True)
+    bot.cached_data[guild_id]["channel_id"] = interaction.channel_id
+    
+    await interaction.response.send_message("Setting up dashboard in this channel...", ephemeral=True)
     await bot.refresh_menu(guild_id, interaction.channel)
 
-# Error handler for when someone lacks permissions
 @setup.error
 async def setup_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     if isinstance(error, app_commands.MissingPermissions):
