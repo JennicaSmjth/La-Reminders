@@ -217,4 +217,12 @@ async def remind_now(interaction: discord.Interaction):
     if remind: await interaction.response.send_message(embed=remind, ephemeral=True)
     else: await interaction.response.send_message("Chill vibes! Nothing due in 3 days. 😎", ephemeral=True)
 
+@bot.tree.command(name="what", description="Quick manual for the bot")
+async def what(interaction: discord.Interaction):
+embed = discord.Embed(title="📘 Ryan's Bot: Quick Guide", color=discord.Color.blue())
+embed.add_field(name="The Logic", value="• **Blue List:** Permanent dashboard. Auto-cleans at 8am.\n• **Red Alert:** Daily 2:30pm check (7 days out).\n• **🚨 High Priority:** Pings @everyone 1 day before due.", inline=False)
+embed.add_field(name="Commands", value="• `/remind_now`: Private 3-day check.\n• `/setup_tracker`: Reset dashboard (Admin).", inline=False)
+embed.set_footer(text="Managed by Ryan")
+await interaction.response.send_message(embed=embed, ephemeral=True)
+
 bot.run(BOT_TOKEN)
