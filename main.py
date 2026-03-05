@@ -66,7 +66,7 @@ class AddTaskModal(ui.Modal):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
     name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
-    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
+    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2030-04-14", min_length=10, max_length=10)
     info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions...", required=False, max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -147,15 +147,16 @@ class MyBot(commands.Bot):
                         inline=False
                     )
 
+            # ADDED: Help section at the bottom of the main dashboard
+            embed.add_field(name="❓ Need help?", value="Use the `/what` command to see how this bot works!", inline=False)
+
             new_msg = await channel.send(embed=embed, view=SubjectView())
             
-            # Anti-Duplicate logic: Delete old board in any channel within THIS server
             if old_id and old_channel_id:
                 old_chan = self.get_channel(int(old_channel_id))
                 if old_chan:
                     asyncio.create_task(self.delete_message_safe(old_chan, old_id))
 
-            # Save state to specific server "folder"
             if guild_id not in self.cached_data: self.cached_data[guild_id] = {}
             self.cached_data[guild_id]["last_menu_id"] = new_msg.id
             self.cached_data[guild_id]["channel_id"] = channel.id 
@@ -198,7 +199,6 @@ async def on_message(message):
     guild_id = str(message.guild.id)
     data = bot.cached_data.get(guild_id)
     
-    # Sticky Trigger: Only works in the channel saved for THIS specific server
     if data and data.get("channel_id") == message.channel.id:
         await bot.refresh_menu(guild_id, message.channel)
     
