@@ -8,6 +8,7 @@ import asyncio
 # ================= CONFIGURATION =================
 BOT_TOKEN = 'huh' 
 ASSIGNMENT_FILE = "grade_tasks.json"
+GRAD_DATE = datetime(2030, 6, 14).date() # Your Graduation Date
 # =================================================
 
 def load_data():
@@ -25,7 +26,6 @@ def parse_date(date_str):
     return None
 
 def get_relative_time(due_date_str):
-    """Calculates dynamic countdown strings like (In 3 days) or (TODAY!)"""
     due_date = parse_date(due_date_str)
     if not due_date: return ""
     today = datetime.now().date()
@@ -66,7 +66,7 @@ class AddTaskModal(ui.Modal):
         super().__init__(title=f"New {subject} Task")
         self.subject = subject
     name = ui.TextInput(label="Assignment Name", placeholder="e.g. Lab Report", required=True)
-    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2030-04-14", min_length=10, max_length=10)
+    date = ui.TextInput(label="Due Date (YYYY-MM-DD)", placeholder="2026-03-05", min_length=10, max_length=10)
     info = ui.TextInput(label="Task Details", style=discord.TextStyle.paragraph, placeholder="Instructions...", required=False, max_length=200)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -93,7 +93,12 @@ class SubjectView(ui.View):
         tasks = interaction.client.cached_data.get(guild_id, {}).get("tasks", [])
         if not tasks: return await interaction.response.send_message("Nothing to clean!", ephemeral=True)
         
-        options = [discord.SelectOption(label=f"{t['name']}", value=str(i)) for i, t in enumerate(tasks)][:25]
+        # FIXED: This now shows the name and the date in the dropdown
+        options = [
+            discord.SelectOption(label=f"{t['name']}", description=f"Due: {t['due']}", value=str(i)) 
+            for i, t in enumerate(tasks)
+        ][:25]
+        
         del_select = ui.Select(placeholder="Select to remove...", options=options)
         
         async def del_callback(idx_interaction: discord.Interaction):
@@ -101,7 +106,6 @@ class SubjectView(ui.View):
             interaction.client.cached_data[guild_id]["tasks"].pop(idx)
             save_data(interaction.client.cached_data)
             
-            # The Oath Message
             await idx_interaction.response.send_message(
                 "✅ Removed.\n\n*I swear to not wrongfully remove any real assignments, and only to remove duplicates. If you break this you're a bitch*", 
                 ephemeral=True
@@ -133,7 +137,6 @@ class MyBot(commands.Bot):
             old_channel_id = data.get("channel_id")
 
             embed = discord.Embed(title="📅 Class Assignment Tracker", description="*Current active deadlines:*", color=discord.Color.blue())
-            embed.set_footer(text="Managed by Ryan")
             
             if not data.get("tasks"):
                 embed.description = "No upcoming deadlines! Chill vibes only. 😎"
@@ -147,8 +150,12 @@ class MyBot(commands.Bot):
                         inline=False
                     )
 
-            # ADDED: Help section at the bottom of the main dashboard
+            # Help Prompt
             embed.add_field(name="❓ Need help?", value="Use the `/what` command to see how this bot works!", inline=False)
+            
+            # Graduation Countdown Footer
+            days_left = (GRAD_DATE - datetime.now().date()).days
+            embed.set_footer(text=f"Managed by Ryan | 🎓 {days_left} Days until Class of 2030 Graduation!")
 
             new_msg = await channel.send(embed=embed, view=SubjectView())
             
@@ -198,10 +205,8 @@ async def on_message(message):
     if message.author == bot.user: return
     guild_id = str(message.guild.id)
     data = bot.cached_data.get(guild_id)
-    
     if data and data.get("channel_id") == message.channel.id:
         await bot.refresh_menu(guild_id, message.channel)
-    
     await bot.process_commands(message)
 
 @bot.tree.command(name="setup_tracker", description="Launch dashboard (Admin)")
