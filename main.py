@@ -135,6 +135,20 @@ def build_urgent_embed(assignments: list, day_range: int = 7):
         )
     return embed
 
+def build_medium_list_embed(assignments: list) -> discord.Embed:
+    """Fallback embed listing all medium priority assignments when nothing is urgent."""
+    mediums = [a for a in assignments if a.get("priority") == "Medium"]
+    embed = discord.Embed(title="📋 No urgent deadlines — here's your mediums", color=discord.Color.yellow())
+    embed.set_footer(text="Ryan's Tracker")
+    for a in sorted(mediums, key=lambda x: x["due"]):
+        ts = due_timestamp(a["due"])
+        embed.add_field(
+            name  = f"🟡 {a['class']}: {a['name']}",
+            value = f"📅 **Due:** <t:{ts}:R>\n{BAR}",
+            inline=False
+        )
+    return embed
+
 # ── Per-guild locks ───────────────────────────────────────────────────────────
 guild_locks: dict = {}
 
@@ -336,13 +350,18 @@ class CleanUpButton(Button):
         await interaction.response.send_message("Delete a task:", view=view, ephemeral=True)
 
 # ── Daily task: auto-clean + reminder pings ───────────────────────────────────
-@tasks.loop(time=time(hour=14, minute=30))
+@tasks.loop(time=time(hour=16, minute=0))
 async def daily_check():
     data     = load_data()
     today    = date.today()
     tomorrow = today + timedelta(days=1)
 
     for guild_id, gd in data.items():
+        # Auto-upgrade LOW → MEDIUM if due tomorrow
+        for a in gd["assignments"]:
+            if a.get("priority") == "Low" and parse_date(a["due"]) == tomorrow:
+                a["priority"] = "Medium"
+
         # Strip past assignments
         gd["assignments"] = [
             a for a in gd["assignments"]
@@ -365,10 +384,14 @@ async def daily_check():
             await channel.send(
                 f"🚨 @everyone **URGENT:** {names} {'is' if len(hp) == 1 else 'are'} due TOMORROW! 🚨")
 
-        # 7-day warning embed
+        # 7-day warning embed — if nothing urgent, fall back to medium list
         remind = build_urgent_embed(gd["assignments"], day_range=7)
         if remind:
             await channel.send(embed=remind)
+        else:
+            mediums = [a for a in gd["assignments"] if a.get("priority") == "Medium"]
+            if mediums:
+                await channel.send(embed=build_medium_list_embed(gd["assignments"]))
 
         await refresh_dashboard(channel.guild)
 
